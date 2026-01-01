@@ -158,12 +158,55 @@ class Text(Element):
 
     @classmethod
     def decode(cls, data):
-        if not isinstance(data.get("45101"), bytes):
+        text_data = data.get("45101")
+        if isinstance(text_data, bytes):
+            return Text(content=text_data.decode('utf-8', errors='ignore'))
+        elif isinstance(text_data, str):
+            return Text(content=text_data)
+        elif isinstance(text_data, dict):
+            # 特殊格式: dict 中的值可能是 ASCII 码
+            # 例如 {'8': 51} -> '@3', {'13': [104, 104, 104]} -> 'hhh'
+            content = cls._parse_dict_text(text_data)
+            return Text(content=content)
+        else:
             return Text(content=None)
-        return Text(content=data["45101"].decode())
+
+    @classmethod
+    def _parse_dict_text(cls, d: dict) -> str | None:
+        """解析 dict 格式的文本数据，提取 ASCII 字符"""
+        result = []
+        for key, val in d.items():
+            chars = cls._extract_ascii_chars(val)
+            if chars:
+                # 字段 8 通常是 @ 消息
+                if key == "8" and chars:
+                    result.append(f"@{chars}")
+                else:
+                    result.append(chars)
+        return "".join(result) if result else None
+
+    @classmethod
+    def _extract_ascii_chars(cls, val) -> str:
+        """从值中提取可打印的 ASCII 字符"""
+        if isinstance(val, int):
+            # 单个 ASCII 码 (32-126 是可打印字符)
+            if 32 <= val <= 126:
+                return chr(val)
+            return ""
+        elif isinstance(val, list):
+            # ASCII 码列表
+            chars = []
+            for v in val:
+                if isinstance(v, int) and 32 <= v <= 126:
+                    chars.append(chr(v))
+            return "".join(chars)
+        elif isinstance(val, dict):
+            # 递归处理嵌套 dict
+            return cls._parse_dict_text(val) or ""
+        return ""
 
     def __str__(self):
-        return self.content
+        return self.content if self.content is not None else ""
 
 
 @ElementRegistry.register(elem_id=2)
@@ -196,8 +239,17 @@ class Image(Element):
         else:
             alt = None
 
+        # 处理 filename 可能是 str 或 bytes 类型
+        filename_raw = data.get("45402")
+        if isinstance(filename_raw, str):
+            filename = filename_raw
+        elif isinstance(filename_raw, bytes):
+            filename = filename_raw.decode('utf-8', errors='ignore')
+        else:
+            filename = None
+
         return Image(
-            filename=filename if isinstance(filename := (data["45402"]), str) else None,
+            filename=filename,
             width=data["45411"],
             height=data["45412"],
             path=data.get("45812"),
@@ -596,10 +648,18 @@ class Message(BaseModel):
         if dbo.msgBody is None:
             elements = []
         else:
-            raw_elements, _ = blackboxprotobuf.decode_message(dbo.msgBody)
-            raw_elements = raw_elements["40800"]
-            if isinstance(raw_elements, dict):
-                raw_elements = [raw_elements]
+            raw_data, _ = blackboxprotobuf.decode_message(dbo.msgBody)
+
+            # 收集所有 40800 相关字段 (40800, 40800-1, 40800-2, ...)
+            raw_elements = []
+            for key in raw_data:
+                if key == "40800" or key.startswith("40800-"):
+                    value = raw_data[key]
+                    if isinstance(value, dict):
+                        raw_elements.append(value)
+                    elif isinstance(value, list):
+                        raw_elements.extend(value)
+
             elements = [ElementRegistry.decode(_) for _ in raw_elements]
 
         return Message(
